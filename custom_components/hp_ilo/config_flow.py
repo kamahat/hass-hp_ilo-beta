@@ -1,16 +1,28 @@
 """Config flow for HpIlo devices."""
+import ipaddress
 import logging
 from urllib.parse import urlparse
+from functools import partial
 import voluptuous as vol
 import hpilo 
 
 from homeassistant import config_entries, data_entry_flow
 from homeassistant.helpers.service_info.ssdp import SsdpServiceInfo, ATTR_UPNP_FRIENDLY_NAME, ATTR_UPNP_MODEL_NAME
-from homeassistant.data_entry_flow import FlowResult
-from homeassistant.const import CONF_HOST, CONF_NAME, CONF_DESCRIPTION, ATTR_CONFIGURATION_URL, CONF_PORT, CONF_PROTOCOL, CONF_UNIQUE_ID, CONF_USERNAME, CONF_PASSWORD
+from homeassistant.config_entries import ConfigFlowResult
+from homeassistant.const import CONF_HOST, CONF_NAME, CONF_DESCRIPTION, ATTR_CONFIGURATION_URL, CONF_PORT, CONF_UNIQUE_ID, CONF_USERNAME, CONF_PASSWORD
 from .sensor import SENSOR_TYPES, DOMAIN
+from .coordinator import ILO_TIMEOUT
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _is_ip_address(value: str | None) -> bool:
+    """Return True if value is an IP address literal (not a hostname)."""
+    try:
+        ipaddress.ip_address(value or "")
+    except ValueError:
+        return False
+    return True
 
 
 class HpIloFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
@@ -43,7 +55,7 @@ class HpIloFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             "model": device.model,
             "host": device.host[0],
         }
-    async def async_step_ssdp(self, discovery_info: SsdpServiceInfo) -> FlowResult:
+    async def async_step_ssdp(self, discovery_info: SsdpServiceInfo) -> ConfigFlowResult:
         """Handle a discovered HP iLO device."""
         _LOGGER.info(
                 "discovery_info : %s.",
@@ -75,7 +87,21 @@ class HpIloFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         self._async_abort_entries_match({CONF_HOST: self.config[CONF_HOST]})
 
         await self.async_set_unique_id(self.config[CONF_UNIQUE_ID])
-        self._abort_if_unique_id_configured(updates=self.config)
+        # A device that is already configured must not be overwritten by what it
+        # announces: SSDP advertises the plain HTTP port (80) and an IP address,
+        # whereas the user configured the SSL port (e.g. 443) and maybe a hostname.
+        # Only follow an IP address change, and only if a bare IP was configured.
+        updates = None
+        entry = self.hass.config_entries.async_entry_for_domain_unique_id(
+            self.handler, self.unique_id
+        )
+        if (
+            entry is not None
+            and _is_ip_address(entry.data.get(CONF_HOST))
+            and entry.data.get(CONF_HOST) != self.config[CONF_HOST]
+        ):
+            updates = {CONF_HOST: self.config[CONF_HOST]}
+        self._abort_if_unique_id_configured(updates=updates)
 
 
 
@@ -156,12 +182,17 @@ class HpIloFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             try:
-                self.ilo = hpilo.Ilo(
-                    hostname=self.config[CONF_HOST],
-                    port=int(self.config[CONF_PORT]),
-                    login=user_input[CONF_USERNAME],
-                    password=user_input[CONF_PASSWORD]
-                ) 
+                # hpilo.Ilo() probes PATH for curl/openssl, so build it off the loop.
+                self.ilo = await self.hass.async_add_executor_job(
+                    partial(
+                        hpilo.Ilo,
+                        hostname=self.config[CONF_HOST],
+                        port=int(self.config[CONF_PORT]),
+                        login=user_input[CONF_USERNAME],
+                        password=user_input[CONF_PASSWORD],
+                        timeout=ILO_TIMEOUT,
+                    )
+                )
                 # Verify connection and get serial number for unique_id
                 host_data = await self.hass.async_add_executor_job(
                     self.ilo.get_host_data

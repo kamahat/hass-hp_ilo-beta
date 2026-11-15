@@ -37,7 +37,7 @@ async def test_manual_flow_success(hass, mock_hpilo):
     assert result["type"] == data_entry_flow.FlowResultType.FORM
     assert result["step_id"] == "user"
 
-    # Submit host/port/protocol - this moves to confirm or auth step
+    # Submit host/port - this moves to confirm or auth step
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], user_input=MOCK_CONFIG_USER_INPUT
     )
@@ -65,6 +65,13 @@ async def test_manual_flow_success(hass, mock_hpilo):
     assert result["data"][CONF_USERNAME] == "Administrator"
     assert result["data"][CONF_PASSWORD] == "test_password"
 
+    # The flow's connection uses the same explicit timeout as the coordinator.
+    import hpilo
+
+    from custom_components.hp_ilo.coordinator import ILO_TIMEOUT
+
+    assert hpilo.Ilo.call_args.kwargs["timeout"] == ILO_TIMEOUT
+
 
 @pytest.mark.asyncio
 async def test_manual_flow_auth_error(hass, mock_hpilo_auth_error):
@@ -73,7 +80,7 @@ async def test_manual_flow_auth_error(hass, mock_hpilo_auth_error):
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
 
-    # Submit host/port/protocol
+    # Submit host/port
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], user_input=MOCK_CONFIG_USER_INPUT
     )
@@ -105,7 +112,7 @@ async def test_manual_flow_connection_error(hass, mock_hpilo_connection_error):
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
 
-    # Submit host/port/protocol
+    # Submit host/port
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], user_input=MOCK_CONFIG_USER_INPUT
     )
